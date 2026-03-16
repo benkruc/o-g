@@ -359,7 +359,10 @@ footer{text-align:center;padding:1.5rem;color:var(--muted);font-family:var(--ff-
 const PROXIES = [
   url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
   url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  url => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+  url => `https://corsproxy.org/?${encodeURIComponent(url)}`,
   url => `https://corsproxy.io/?${encodeURIComponent(url.replace('query1','query2'))}`,
+  url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url.replace('query1','query2'))}`,
 ];
 const YF1   = 'https://query1.finance.yahoo.com';
 const YF2   = 'https://query2.finance.yahoo.com';
@@ -557,10 +560,13 @@ async function fetchYahooData(ticker) {
   ].join(',');
 
   // Try v10, v11, and query2 variants
+const modsFin  = 'financialData,summaryDetail,defaultKeyStatistics,price';
+  const modsFull = mods;
   const urls = [
-    `${YF1}/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${mods}&corsDomain=finance.yahoo.com`,
-    `${YF2}/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${mods}&corsDomain=finance.yahoo.com`,
-    `https://query2.finance.yahoo.com/v11/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${mods}`,
+    `${YF2}/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${modsFull}&corsDomain=finance.yahoo.com`,
+    `${YF1}/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${modsFull}&corsDomain=finance.yahoo.com`,
+    `https://query2.finance.yahoo.com/v11/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${modsFull}`,
+    `${YF2}/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${modsFin}`,
   ];
 
   let last;
