@@ -555,19 +555,34 @@ async function fetchYahooData(ticker) {
     'assetProfile','incomeStatementHistory','cashflowStatementHistory',
     'balanceSheetHistory','price','earningsTrend'
   ].join(',');
+
+  // Try v10, v11, and query2 variants
   const urls = [
-    `${YF1}/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${mods}`,
-    `${YF2}/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${mods}`,
+    `${YF1}/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${mods}&corsDomain=finance.yahoo.com`,
+    `${YF2}/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${mods}&corsDomain=finance.yahoo.com`,
+    `https://query2.finance.yahoo.com/v11/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${mods}`,
   ];
+
   let last;
   for (const url of urls) {
-    try {
-      const d = await tryFetch(url);
-      if (d?.quoteSummary?.result?.[0]) return d.quoteSummary.result[0];
-      if (d?.quoteSummary?.error) last = d.quoteSummary.error.description;
-    } catch(e) { last = e.message; }
+    for (const makeProxy of [u=>u, ...PROXIES]) {
+      try {
+        const proxyUrl = makeProxy(url);
+        const r = await fetch(proxyUrl, {headers:{'Accept':'application/json'}});
+        if (!r.ok) continue;
+        const text = await r.text();
+        // Skip if we got HTML (bot check page)
+        if (text.trim().startsWith('<')) continue;
+        let d;
+        try { d = JSON.parse(text); } catch(_) { continue; }
+        // Handle allorigins {contents} wrapping
+        if (d?.contents) { try { d = JSON.parse(d.contents); } catch(_) { continue; } }
+        if (d?.quoteSummary?.result?.[0]) return d.quoteSummary.result[0];
+        if (d?.quoteSummary?.error?.description) last = d.quoteSummary.error.description;
+      } catch(e) { last = e.message; }
+    }
   }
-  throw new Error(last || `No data found for "${ticker}". Check the ticker symbol.`);
+  throw new Error(last || `No data found for "${ticker}". Try XOM or CNQ.TO to test — SOIL.TO may have limited Yahoo coverage.`);
 }
 
 // ── 7. SUB-SECTOR DETECTION ──────────────────────────────
