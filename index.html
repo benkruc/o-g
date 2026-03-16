@@ -356,7 +356,11 @@ footer{text-align:center;padding:1.5rem;color:var(--muted);font-family:var(--ff-
 // ═══════════════════════════════════════════════════════════
 
 // ── 1. CONFIG ────────────────────────────────────────────
-const PROXY = 'https://corsproxy.io/?';
+const PROXIES = [
+  url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  url => `https://corsproxy.io/?${encodeURIComponent(url.replace('query1','query2'))}`,
+];
 const YF1   = 'https://query1.finance.yahoo.com';
 const YF2   = 'https://query2.finance.yahoo.com';
 pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -521,16 +525,28 @@ function renderCommodityBanner(c) {
 
 // ── 6. YAHOO FINANCE FETCH ───────────────────────────────
 async function tryFetch(url) {
+  // Try direct first
   try {
-    const r = await fetch(url, {headers:{'Accept':'application/json'}});
+    const r = await fetch(url, {headers:{'Accept':'application/json','User-Agent':'Mozilla/5.0'}});
     if (r.ok) {
       const d = await r.json();
       if (!d?.quoteSummary?.error && !d?.chart?.error) return d;
     }
   } catch(_) {}
-  const r2 = await fetch(PROXY + encodeURIComponent(url));
-  if (!r2.ok) throw new Error(`HTTP ${r2.status}`);
-  return r2.json();
+
+  // Try each proxy in sequence
+  for (const makeProxy of PROXIES) {
+    try {
+      const r = await fetch(makeProxy(url), {headers:{'Accept':'application/json'}});
+      if (!r.ok) continue;
+      const d = await r.json();
+      // allorigins wraps in {contents: "..."}
+      const parsed = typeof d === 'string' ? JSON.parse(d) :
+                     d?.contents ? JSON.parse(d.contents) : d;
+      if (!parsed?.quoteSummary?.error && !parsed?.chart?.error) return parsed;
+    } catch(_) {}
+  }
+  throw new Error(`Could not fetch data for this ticker. Yahoo Finance may be temporarily blocking requests — try again in 30 seconds.`);
 }
 
 async function fetchYahooData(ticker) {
