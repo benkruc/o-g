@@ -921,7 +921,7 @@ function renderTearsheet(m,commod){
     ${m.wtiReal?tR('WTI Realized (US$/Bbl)','US$'+f2(m.wtiReal),'','gem'):tR('WTI Realized',naAif(),'mu','')}
     ${m.aecoReal?tR('AECO Realized (C$/GJ)','C$'+f2(m.aecoReal),'','gem'):tR('AECO Realized',naAif(),'mu','')}
     ${m.royRate?tR('Effective Royalty Rate',f1(m.royRate)+'%','','gem'):tR('Royalty Rate',naAif(),'mu','')}
-    ${tR('Breakeven WTI (est.)',m.breakeven?`~$${f0(m.breakeven)}/bbl`:naAif('Upload AIF →'),m.breakeven&&wti&&wti>m.breakeven?'pos':m.breakeven?'neg':'mu',m.breakeven?'calc','')}
+    ${tR('Breakeven WTI (est.)',m.breakeven?`~$${f0(m.breakeven)}/bbl`:naAif('Upload AIF →'),m.breakeven&&wti&&wti>m.breakeven?'pos':m.breakeven?'neg':'mu',m.breakeven?'calc':'')}
   </table></div>`;
   const ops=`<div class="ts-section"><div class="ts-section-header">⛽ Operations</div><table class="ts-table">
     ${tRH('Production')}
