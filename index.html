@@ -504,18 +504,34 @@ async function fetchFinnhubData(ticker){
 }
 
 // ── GEMINI CALL ───────────────────────────────────────────
-async function callGemini(text,prompt){
+async function callGemini(text,prompt,retries=3){
   if(!STATE.gemKey)return null;
-  // Rate limit: 4s between calls
-  const wait=4000-(Date.now()-STATE.lastGemCall);
+  // Rate limit: 5s between calls
+  const wait=5000-(Date.now()-STATE.lastGemCall);
   if(wait>0){setDocStatus('ar-status',`⏳ Rate limit pause (${Math.ceil(wait/1000)}s)…`,'parsing');await new Promise(r=>setTimeout(r,wait));}
   STATE.lastGemCall=Date.now();
-  const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${STATE.gemKey}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:prompt+'\n\n---\n\n'+text.slice(0,32000)}]}],generationConfig:{temperature:0,responseMimeType:'application/json'}})});
-  if(!r.ok)throw new Error(`Gemini ${r.status}`);
-  const d=await r.json();
-  const raw=d.candidates?.[0]?.content?.parts?.[0]?.text;
-  if(!raw)throw new Error('Gemini returned empty response');
-  return JSON.parse(raw.replace(/```json|```/g,'').trim());
+
+  for(let attempt=1;attempt<=retries;attempt++){
+    try{
+      const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${STATE.gemKey}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:prompt+'\n\n---\n\n'+text.slice(0,32000)}]}],generationConfig:{temperature:0,responseMimeType:'application/json'}})});
+      if(r.status===429){
+        // Quota hit — wait 65s then retry
+        const waitMs=65000;
+        setDocStatus('ar-status',`⏳ Gemini rate limit — waiting ${Math.ceil(waitMs/1000)}s (attempt ${attempt}/${retries})…`,'parsing');
+        await new Promise(res=>setTimeout(res,waitMs));
+        STATE.lastGemCall=Date.now();
+        continue;
+      }
+      if(!r.ok)throw new Error(`Gemini ${r.status}: ${r.statusText}`);
+      const d=await r.json();
+      const raw=d.candidates?.[0]?.content?.parts?.[0]?.text;
+      if(!raw)throw new Error('Gemini returned empty response');
+      return JSON.parse(raw.replace(/```json|```/g,'').trim());
+    }catch(e){
+      if(attempt===retries)throw e;
+      await new Promise(res=>setTimeout(res,5000));
+    }
+  }
 }
 
 const AIF_PROMPT=`You are an expert oil & gas analyst. Extract data from this AIF/regulatory filing. Return ONLY valid JSON with these exact keys (null if not found, numbers not strings):
@@ -690,6 +706,7 @@ function calcMetrics(fh,aif,commod){
   const nd_f     = man._man_ndM    !=null?man._man_ndM*1e6    :netDebt;
 
   const ev=(mktCap!=null&&nd_f!=null)?mktCap+nd_f:(mktCap??null);
+  const evIsEstimated=(nd_f==null); // flag: EV excludes net debt if no debt data
   const taxRate=0.25;
   const dacf=opCF_f!=null?opCF_f+(intExp??0)*(1-taxRate):null;
 
@@ -714,7 +731,12 @@ function calcMetrics(fh,aif,commod){
   // AIF fields
   const prodBoed=aif?.prodBoed??null,liquidsPct=aif?.liquidsPct??null,prodGas=aif?.prodGasMmcfd??null,prodLiq=aif?.prodLiqBbld??null;
   const pdpMmboe=aif?.pdpMmboe??null,res1P=aif?.reserves1P??null,res2P=aif?.reserves2P??null;
-  const netbackBoe=aif?.netbackBoe??null,revBoe=aif?.revPerBoe??null,royBoe=aif?.royPerBoe??null,opexBoe=aif?.opexPerBoe??null,transBoe=aif?.transPerBoe??null,gnaBoe=aif?.gnaPerBoe??null,intBoe=aif?.interestPerBoe??null;
+  // Compute netback from components if available (standard: rev - roy - opex - trans, excludes G&A)
+  const _revB=aif?.revPerBoe??null,_royB=aif?.royPerBoe??null,_opexB=aif?.opexPerBoe??null,_transB=aif?.transPerBoe??null;
+  const netbackFromComponents=(_revB&&_royB!=null&&_opexB)?_revB-(_royB??0)-_opexB-(_transB??0):null;
+  // Use component-derived netback if it differs significantly from extracted value (extracted may include G&A)
+  const _rawNetback=aif?.netbackBoe??null;
+  const netbackBoe=netbackFromComponents??_rawNetback,revBoe=aif?.revPerBoe??null,royBoe=aif?.royPerBoe??null,opexBoe=aif?.opexPerBoe??null,transBoe=aif?.transPerBoe??null,gnaBoe=aif?.gnaPerBoe??null,intBoe=aif?.interestPerBoe??null;
   const fdCost=aif?.fdCost??null,rli=aif?.rli??null,recycleR=aif?.recycleRatio??(netbackBoe&&fdCost&&fdCost>0?netbackBoe/fdCost:null);
   const wtiReal=aif?.wtiRealized??null,aecoReal=aif?.aecoRealized??null,royRate=aif?.royaltyRate??null;
   const evBoepd=ev&&prodBoed?ev/prodBoed:null;
@@ -734,7 +756,7 @@ function calcMetrics(fh,aif,commod){
   // Data source tracking
   const _src={opCF:opCFM_ar!=null?'gem':(cfpsSh?'calc':'—'),fcf:fcfM_ar!=null?'gem':'fh',netDebt:netDebtM_ar!=null?'gem':'fh',revenue:revM_ar!=null?'gem':'calc',ebitda:ebitdaM_ar!=null?'gem':'fh'};
 
-  return{currency,isCAD,priceDisplay,changeAmt,changePct,price,mktCap,sharesBasic,sharesDilut:sharesBasic,ev,hi52,lo52,beta,revenue:rev_f,netIncome,ebit,ebitda:ebitda_f,opCF:opCF_f,capex:capex_f,fcf:fcf_f,dacf,buybacks,divsPd,da:null,intExp,taxExp:null,acquisitions:null,totalDebt,cash,bankDebt:null,otherDebt:null,totalAssets,currLib:null,currAss:null,equity,workingCap:null,netDebt:nd_f,cfpsBasic,cfpsDilut:cfpsBasic,epsBasic,epsDilut:epsBasic,fcfPerShare,evDacf,evEbitda,fcfYield,ndCf,ndEbitda,intCov,currRatio,netMargin:normPct(safe(m.netMarginAnnual)),dacfMargin,fcfMargin,roic,pe,fwdPe:null,divYield,divRate,totalReturn,totalReturnYield,capexDivRatio:null,prodBoed,liquidsPct,prodGas,prodLiq,pdpMmboe,res1P,res2P,netbackBoe,revBoe,royBoe,opexBoe,transBoe,gnaBoe,intBoe,fdCost,rli,recycleR,wtiReal,aecoReal,royRate,evBoepd,prodShare,pdpNav,nav2P,pNav,pNav2P,navShare:null,breakeven,liquidFrac,wti:commod?.wti,brent:commod?.brent,cadusd:commod?.cadusd??0.74,_src};
+  return{currency,isCAD,priceDisplay,changeAmt,changePct,price,evIsEstimated,mktCap,sharesBasic,sharesDilut:sharesBasic,ev,hi52,lo52,beta,revenue:rev_f,netIncome,ebit,ebitda:ebitda_f,opCF:opCF_f,capex:capex_f,fcf:fcf_f,dacf,buybacks,divsPd,da:null,intExp,taxExp:null,acquisitions:null,totalDebt,cash,bankDebt:null,otherDebt:null,totalAssets,currLib:null,currAss:null,equity,workingCap:null,netDebt:nd_f,cfpsBasic,cfpsDilut:cfpsBasic,epsBasic,epsDilut:epsBasic,fcfPerShare,evDacf,evEbitda,fcfYield,ndCf,ndEbitda,intCov,currRatio,netMargin:normPct(safe(m.netMarginAnnual)),dacfMargin,fcfMargin,roic,pe,fwdPe:null,divYield,divRate,totalReturn,totalReturnYield,capexDivRatio:null,prodBoed,liquidsPct,prodGas,prodLiq,pdpMmboe,res1P,res2P,netbackBoe,revBoe,royBoe,opexBoe,transBoe,gnaBoe,intBoe,fdCost,rli,recycleR,wtiReal,aecoReal,royRate,evBoepd,prodShare,pdpNav,nav2P,pNav,pNav2P,navShare:null,breakeven,liquidFrac,wti:commod?.wti,brent:commod?.brent,cadusd:commod?.cadusd??0.74,_src};
 }
 
 // ── SENSITIVITY MODEL ─────────────────────────────────────
@@ -1069,7 +1091,7 @@ function renderTearsheet(m,commod){
     ${tR('Current Ratio',m.currRatio!=null?f2(m.currRatio)+'x':'—','','fh')}
     ${tRH('Market Data')}
     ${tR('Market Cap',C(m.mktCap),'','fh')}
-    ${tR('Enterprise Value',C(m.ev),'','calc')}
+    ${tR('Enterprise Value',m.evIsEstimated&&m.ev?C(m.ev)+' *':'—','',m.evIsEstimated?'est':'calc')}
     ${tR('EV / DACF',m.evDacf?f1(m.evDacf)+'x':'—','','calc')}
     ${tR('EV / EBITDA',m.evEbitda?f1(m.evEbitda)+'x':'—','','calc')}
     ${tR('P/E',m.pe?f1(m.pe)+'x':'—','','fh')}
@@ -1085,7 +1107,7 @@ function renderTearsheet(m,commod){
     <span style="color:var(--pos)">◆</span> AIF &nbsp;
     <span style="color:var(--muted)">◆</span> Calculated &nbsp;
     <span style="color:var(--warn)">◆</span> Yahoo<br/>
-    ${STATE.gemKey?'🤖 Gemini active — upload AIF + Annual Report for full data':'⚠ No Gemini key — add key for AI-powered PDF extraction'}
+    ${STATE.gemKey?'🤖 Gemini active — upload AIF + Annual Report for full data':'⚠ No Gemini key — add key for AI-powered PDF extraction'}${m.evIsEstimated?' · * EV excludes net debt (upload Annual Report for accurate EV/DACF)':''}
   </div></div>`;
   document.getElementById('tearsheet-grid').innerHTML=priceDeck+ops+cashflow+balSheet;
 }
@@ -1157,12 +1179,61 @@ function _renderSensScenarios(m,wti,aeco){
 }
 
 function _renderSensChart(m,wti,aeco){
-  const prices=[];for(let p=35;p<=120;p+=5)prices.push(p);
-  const dacfVals=prices.map(p=>calcAtWTI(m,p,aeco).dacf),fcfVals=prices.map(p=>calcAtWTI(m,p,aeco).fcf),barColors=fcfVals.map(v=>(v??0)>=0?'rgba(16,185,129,.75)':'rgba(239,68,68,.75)');
-  const ctx=document.getElementById('chart-sens');
-  if(ctx){if(sensitivityChart){sensitivityChart.destroy();sensitivityChart=null;}sensitivityChart=new Chart(ctx,{type:'bar',data:{labels:prices.map(p=>`$${p}`),datasets:[{label:'FCF',data:fcfVals,backgroundColor:barColors,yAxisID:'y',borderRadius:3},{label:'DACF',data:dacfVals,type:'line',borderColor:'rgba(245,158,11,.8)',backgroundColor:'transparent',pointRadius:2,tension:.4,yAxisID:'y'}]},options:{responsive:true,maintainAspectRatio:true,interaction:{mode:'index',intersect:false},plugins:{legend:{labels:{color:'#9aaac4',font:{family:'JetBrains Mono',size:11}}},tooltip:{backgroundColor:'#131820',borderColor:'#28344a',borderWidth:1,callbacks:{label:ctx=>{const v=ctx.raw;if(!v)return'';const a=Math.abs(v),s=v<0?'-':'';return` ${ctx.dataset.label}: ${a>=1e9?s+'$'+(a/1e9).toFixed(1)+'B':s+'$'+(a/1e6).toFixed(0)+'M'}`;},},}},scales:{x:{grid:{color:'rgba(30,39,56,.8)'},ticks:{color:'#6a7a9a',font:{family:'JetBrains Mono',size:10}}},y:{grid:{color:'rgba(30,39,56,.8)'},ticks:{color:'#6a7a9a',font:{family:'JetBrains Mono',size:10},callback:v=>{const a=Math.abs(v),s=v<0?'-':'';return a>=1e9?s+'$'+(a/1e9).toFixed(1)+'B':s+'$'+(a/1e6).toFixed(0)+'M';}}}}}})}
+  const prices=[];
+  for(let p=35;p<=120;p+=5) prices.push(p);
+  const dacfVals  = prices.map(p=>calcAtWTI(m,p,aeco).dacf);
+  const fcfVals   = prices.map(p=>calcAtWTI(m,p,aeco).fcf);
+  const barColors = fcfVals.map(v=>(v??0)>=0?'rgba(16,185,129,.75)':'rgba(239,68,68,.75)');
+  const ctx = document.getElementById('chart-sens');
+  if(!ctx) return;
+  // Update existing chart without flicker (no destroy/recreate)
+  if(sensitivityChart){
+    sensitivityChart.data.datasets[0].data            = fcfVals;
+    sensitivityChart.data.datasets[0].backgroundColor = barColors;
+    sensitivityChart.data.datasets[1].data            = dacfVals;
+    sensitivityChart.update('none');
+    return;
+  }
+  // First render — create chart
+  sensitivityChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: prices.map(p=>`$${p}`),
+      datasets: [
+        {label:'FCF',  data:fcfVals,  backgroundColor:barColors, yAxisID:'y', borderRadius:3},
+        {label:'DACF', data:dacfVals, type:'line', borderColor:'rgba(245,158,11,.8)',
+         backgroundColor:'transparent', pointRadius:2, tension:.4, yAxisID:'y'}
+      ]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:true,
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{labels:{color:'#9aaac4',font:{family:'JetBrains Mono',size:11}}},
+        tooltip:{
+          backgroundColor:'#131820',borderColor:'#28344a',borderWidth:1,
+          callbacks:{label:c=>{
+            const v=c.raw;if(v==null)return'';
+            const a=Math.abs(v),s=v<0?'-':'';
+            return ` ${c.dataset.label}: ${a>=1e9?s+'$'+(a/1e9).toFixed(1)+'B':s+'$'+(a/1e6).toFixed(0)+'M'}`;
+          }}
+        }
+      },
+      scales:{
+        x:{grid:{color:'rgba(30,39,56,.8)'},ticks:{color:'#6a7a9a',font:{family:'JetBrains Mono',size:10}}},
+        y:{
+          grid:{color:'rgba(30,39,56,.8)'},
+          ticks:{color:'#6a7a9a',font:{family:'JetBrains Mono',size:10},
+            callback:v=>{
+              const a=Math.abs(v),s=v<0?'-':'';
+              return a>=1e9?s+'$'+(a/1e9).toFixed(1)+'B':s+'$'+(a/1e6).toFixed(0)+'M';
+            }
+          }
+        }
+      }
+    }
+  });
 }
-
 function _renderSensMatrix(m,wti,aeco){
   const tbody=document.getElementById('sens-matrix-body');
   if(tbody){const matPrices=[40,50,55,60,65,70,75,80,85,90,100,110,120];tbody.innerHTML=matPrices.map(p=>{const r=calcAtWTI(m,p,aeco),isBase=Math.abs(p-wti)<3,ndCol=(r.ndCf??99)<=1.5?'pos':(r.ndCf??99)<=2.5?'':'neg',fcfCol=(r.fcfY??0)>=.10?'pos':(r.fcfY??0)<0?'neg':'',evD=m.ev&&r.dacf&&r.dacf>0?m.ev/r.dacf:null;return`<tr${isBase?' style="background:rgba(245,158,11,.06);font-weight:600"':''}><td style="${isBase?'color:var(--accent)':''}">$${p}/bbl${isBase?' ★':''}</td><td>${cV(m,r.dacf)}</td><td class="${fcfCol}">${cV(m,r.fcf)}</td><td class="${fcfCol}">${r.fcfY!=null?pct(r.fcfY):'—'}</td><td class="${ndCol}">${r.ndCf!=null?f1(r.ndCf)+'x':m.netDebt!=null&&m.netDebt<0?'Net Cash':'—'}</td><td>${evD?f1(evD)+'x':'—'}</td></tr>`;}).join('');}
