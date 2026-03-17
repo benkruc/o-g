@@ -391,7 +391,7 @@ footer{text-align:center;padding:1.5rem;color:var(--muted);font-family:var(--ff-
 // ═══════════════════════════════════════════════════════════
 //  KRUCHTEN FINANCE v3 — Full Engine
 // ═══════════════════════════════════════════════════════════
-pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+if(typeof pdfjsLib !== 'undefined') pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
 
 // ── COMMODITY PROXIES ─────────────────────────────────────
 const PROXIES=[
@@ -740,7 +740,13 @@ function calcMetrics(fh,aif,commod){
 function calcAtWTI(m,wtiNew,aecoNew){
   const wtiBase=m.wti??75,aecoBase=2.5,liqFrac=m.liquidFrac??0.65,gasFrac=1-liqFrac;
   let dacfNew=m.dacf??m.opCF??0;
-  if(m.prodBoed){const od=(wtiNew-wtiBase)*m.prodBoed*liqFrac*365,gd=(aecoNew-aecoBase)*(m.prodGas??m.prodBoed*gasFrac/1000*6)*1000/6*365;dacfNew+=(od+gd)*0.82;}
+  if(m.prodBoed){// Oil delta: prodBoed * liqFrac BOE/d * 365 days * deltaWTI $/BOE (1 Bbl oil ≈ 1 BOE)
+  const od=(wtiNew-wtiBase)*m.prodBoed*liqFrac*365;
+  // Gas delta: prodGas Mmcf/d * 1000 Mcf/Mmcf * 365 days * deltaAECO $/Mcf
+  // Fallback when no prodGas: use prodBoed * gasFrac * 6 Mcf/BOE
+  const gasVol_McfD=m.prodGas!=null?m.prodGas*1000:m.prodBoed*gasFrac*6;
+  const gd=(aecoNew-aecoBase)*gasVol_McfD*365;
+  dacfNew+=(od+gd)*0.82;}
   else if(m.revenue){const rs=(wtiNew/wtiBase)*liqFrac+gasFrac;dacfNew=(m.dacf??m.opCF??0)*rs;}
   const fcfNew=m.capex?dacfNew-m.capex:dacfNew*0.6;
   return{wti:wtiNew,aeco:aecoNew,dacf:dacfNew,fcf:fcfNew,ndCf:m.netDebt!=null&&dacfNew>0?m.netDebt/dacfNew:null,fcfY:m.mktCap?fcfNew/m.mktCap:null};
@@ -798,11 +804,15 @@ function dDrop(e,type){e.preventDefault();dLeave(type==='aif'?'aif-drop':'ar-dro
 function fSelect(e,type){const f=e.target.files[0];if(f){if(type==='aif')doAIF(f);else doAR(f);}}
 
 async function doAIF(file){
-  STATE.lastGemCall=Date.now()-3500; // allow immediate call
+  STATE.gemKey=document.getElementById('gem-key')?.value?.trim()??STATE.gemKey;
+  STATE.fhKey=document.getElementById('fh-key')?.value?.trim()??STATE.fhKey;
+  STATE.lastGemCall=Date.now()-3500;
   AIF_DATA=await parseAIF(file);
   if(STATE.metrics&&STATE._raw)refresh();
 }
 async function doAR(file){
+  STATE.gemKey=document.getElementById('gem-key')?.value?.trim()??STATE.gemKey;
+  STATE.fhKey=document.getElementById('fh-key')?.value?.trim()??STATE.fhKey;
   AR_DATA=await parseAR(file);
   if(STATE.metrics&&STATE._raw)refresh();
 }
@@ -825,7 +835,49 @@ function mergeAIFandAR(aif,ar){
 function setDocStatus(id,msg,cls){const el=document.getElementById(id);if(!el)return;el.textContent=msg;el.className=`doc-status vis ${cls}`;}
 
 // ── MANUAL ENTRY MODAL ────────────────────────────────────
-function openModal(){document.getElementById('manual-modal').style.display='block';document.body.style.overflow='hidden';}
+function openModal(){
+  // Pre-populate with existing parsed data so user only fills in gaps
+  const src=Object.assign({}, AIF_DATA??{}, STATE.manualData);
+  const AR=AR_DATA??{};
+  const fill=(id,val)=>{const el=document.getElementById(id);if(el&&val!=null&&val!==undefined&&el.value==='')el.value=val;};
+  fill('m-prodBoed', src.prodBoed);
+  fill('m-prodLiq',  src.prodLiqBbld);
+  fill('m-prodGas',  src.prodGasMmcfd);
+  fill('m-liqPct',   src.liquidsPct);
+  fill('m-pdp',      src.pdpMmboe);
+  fill('m-1p',       src.reserves1P);
+  fill('m-2p',       src.reserves2P);
+  fill('m-rli',      src.rli);
+  fill('m-rev',      src.revPerBoe);
+  fill('m-roy',      src.royPerBoe);
+  fill('m-opex',     src.opexPerBoe);
+  fill('m-trans',    src.transPerBoe);
+  fill('m-gna',      src.gnaPerBoe);
+  fill('m-nb',       src.netbackBoe);
+  fill('m-fd',       src.fdCost);
+  fill('m-recycle',  src.recycleRatio);
+  fill('m-wti',      src.wtiRealized);
+  fill('m-aeco',     src.aecoRealized);
+  // Financial overrides from AR
+  if(AR.netDebtM!=null)  fill('m-nd',    AR.netDebtM);
+  if(AR.opCFM!=null)     fill('m-opcf',  AR.opCFM);
+  if(AR.capexM!=null)    fill('m-capex', AR.capexM);
+  if(AR.fcfM!=null)      fill('m-fcf',   AR.fcfM);
+  if(AR.revenueM!=null)  fill('m-rev2',  AR.revenueM);
+  if(AR.ebitdaM!=null)   fill('m-ebitda',AR.ebitdaM);
+  // Also pre-fill from STATE.metrics if available (Finnhub values in millions)
+  if(STATE.metrics){
+    const m=STATE.metrics,scale=1e-6;
+    if(m.netDebt!=null)  fill('m-nd',    (m.netDebt*scale).toFixed(0));
+    if(m.opCF!=null)     fill('m-opcf',  (m.opCF*scale).toFixed(0));
+    if(m.capex!=null)    fill('m-capex', (m.capex*scale).toFixed(0));
+    if(m.fcf!=null)      fill('m-fcf',   (m.fcf*scale).toFixed(0));
+    if(m.revenue!=null)  fill('m-rev2',  (m.revenue*scale).toFixed(0));
+    if(m.ebitda!=null)   fill('m-ebitda',(m.ebitda*scale).toFixed(0));
+  }
+  document.getElementById('manual-modal').style.display='block';
+  document.body.style.overflow='hidden';
+}
 function closeModal(){document.getElementById('manual-modal').style.display='none';document.body.style.overflow='';}
 function clearModal(){STATE.manualData={};['prodBoed','prodLiq','prodGas','liqPct','pdp','1p','2p','rli','rev','roy','opex','trans','gna','nb','fd','recycle','wti','aeco','nd','opcf','capex','fcf','rev2','ebitda'].forEach(k=>{const el=document.getElementById('m-'+k);if(el)el.value='';});}
 function saveModal(){
@@ -1030,35 +1082,47 @@ function renderPeers(m,ss){
 let sensitivityChart=null;
 function renderSensitivity(m){
   const baseWTI=Math.round((m.wti??75)/5)*5,baseAECO=2.5;
-  document.getElementById('sensitivity-content').innerHTML=`<div class="section-label">WTI & AECO Price Sensitivity</div><div class="sensitivity-controls"><div class="slider-grid"><div class="slider-group"><div class="slider-label"><span class="slider-name">WTI Crude (US$/Bbl)</span><span class="slider-val" id="sv-wti">US$${baseWTI}</span></div><input type="range" id="sl-wti" min="35" max="120" step="5" value="${baseWTI}" oninput="updateSensitivity()"/></div><div class="slider-group"><div class="slider-label"><span class="slider-name">AECO Gas (C$/GJ)</span><span class="slider-val" id="sv-aeco">C$${baseAECO.toFixed(2)}</span></div><input type="range" id="sl-aeco" min="1.0" max="8.0" step="0.25" value="${baseAECO}" oninput="updateSensitivity()"/></div></div></div><div class="sens-cards" id="sens-cards"></div><div class="section-label" style="margin-top:1.25rem">FCF vs WTI Price Curve</div><div class="chart-container" style="max-height:320px"><div style="font-family:var(--ff-m);font-size:.63rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:1rem">Free Cash Flow at Various WTI Prices</div><canvas id="chart-sens" style="max-height:260px"></canvas></div><div class="section-label" style="margin-top:1.25rem">Full Sensitivity Matrix</div><div class="val-wrap"><table class="val-table"><thead><tr><th style="text-align:left">WTI (US$/Bbl)</th><th>DACF</th><th>FCF</th><th>FCF Yield</th><th>ND/CF</th><th>EV/DACF</th></tr></thead><tbody id="sens-matrix-body"></tbody></table></div>`;
+  document.getElementById('sensitivity-content').innerHTML=`<div class="section-label">WTI & AECO Price Sensitivity</div><div class="sensitivity-controls"><div class="slider-grid"><div class="slider-group"><div class="slider-label"><span class="slider-name">WTI Crude (US$/Bbl)</span><span class="slider-val" id="sv-wti">US$${baseWTI}</span></div><input type="range" id="sl-wti" min="35" max="120" step="5" value="${baseWTI}" oninput="updateSensCards()"/></div><div class="slider-group"><div class="slider-label"><span class="slider-name">AECO Gas (C$/GJ)</span><span class="slider-val" id="sv-aeco">C$${baseAECO.toFixed(2)}</span></div><input type="range" id="sl-aeco" min="1.0" max="8.0" step="0.25" value="${baseAECO}" oninput="updateSensCards()"/></div></div></div><div class="sens-cards" id="sens-cards"></div><div class="section-label" style="margin-top:1.25rem">FCF vs WTI Price Curve</div><div class="chart-container" style="max-height:320px"><div style="font-family:var(--ff-m);font-size:.63rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:1rem">Free Cash Flow at Various WTI Prices</div><canvas id="chart-sens" style="max-height:260px"></canvas></div><div class="section-label" style="margin-top:1.25rem">Full Sensitivity Matrix</div><div class="val-wrap"><table class="val-table"><thead><tr><th style="text-align:left">WTI (US$/Bbl)</th><th>DACF</th><th>FCF</th><th>FCF Yield</th><th>ND/CF</th><th>EV/DACF</th></tr></thead><tbody id="sens-matrix-body"></tbody></table></div>`;
   updateSensitivity();
 }
+let _sensChartTimer=null;
+
+function updateSensCards(){
+  const m=STATE.metrics;if(!m)return;
+  const wti=parseFloat(document.getElementById('sl-wti')?.value??75),aeco=parseFloat(document.getElementById('sl-aeco')?.value??2.5);
+  document.getElementById('sv-wti').textContent=`US$${wti}`;document.getElementById('sv-aeco').textContent=`C$${aeco.toFixed(2)}`;
+  _renderSensScenarios(m,wti,aeco);
+  _renderSensMatrix(m,wti,aeco);
+  clearTimeout(_sensChartTimer);
+  _sensChartTimer=setTimeout(()=>_renderSensChart(m,wti,aeco),400);
+}
+
 function updateSensitivity(){
   const m=STATE.metrics;if(!m)return;
   const wti=parseFloat(document.getElementById('sl-wti')?.value??75),aeco=parseFloat(document.getElementById('sl-aeco')?.value??2.5);
   document.getElementById('sv-wti').textContent=`US$${wti}`;document.getElementById('sv-aeco').textContent=`C$${aeco.toFixed(2)}`;
+  _renderSensScenarios(m,wti,aeco);
+  _renderSensChart(m,wti,aeco);
+  _renderSensMatrix(m,wti,aeco);
+}
+
+function _renderSensScenarios(m,wti,aeco){
   const C=v=>cV(m,v);
   const scenarios=[{label:'Bear',wti:wti-20,aeco:aeco-.75},{label:'Low',wti:wti-10,aeco:aeco-.5},{label:'Base ★',wti:wti,aeco:aeco,isBase:true},{label:'High',wti:wti+10,aeco:aeco+.5},{label:'Bull',wti:wti+20,aeco:aeco+1.0}].filter(s=>s.wti>=30);
   const cardsEl=document.getElementById('sens-cards');
   if(cardsEl)cardsEl.innerHTML=scenarios.map(s=>{const r=calcAtWTI(m,s.wti,s.aeco),fcfCol=(r.fcfY??0)>=.10?'var(--pos)':(r.fcfY??0)>=0?'var(--warn)':'var(--neg)',ndCol=(r.ndCf??99)<=1.5?'var(--pos)':(r.ndCf??99)<=2.5?'var(--warn)':'var(--neg)';return`<div class="sens-card${s.isBase?' base':''}"><div class="sens-scenario">${s.label}</div><div class="sens-wti">WTI $${s.wti}/bbl · AECO $${s.aeco.toFixed(2)}</div><div class="sens-dacf">${C(r.dacf)}</div><div style="font-family:var(--ff-m);font-size:.65rem;color:var(--muted);margin-top:.15rem">DACF</div><div class="sens-fcf" style="color:${fcfCol}">FCF: ${C(r.fcf)}</div><div class="sens-yield" style="color:${fcfCol}">Yield: ${r.fcfY!=null?pct(r.fcfY):'—'}</div><div class="sens-nd" style="color:${ndCol}">ND/CF: ${r.ndCf!=null?f1(r.ndCf)+'x':m.netDebt!=null&&m.netDebt<0?'Net Cash':'—'}</div></div>`;}).join('');
+}
+
+function _renderSensChart(m,wti,aeco){
   const prices=[];for(let p=35;p<=120;p+=5)prices.push(p);
   const dacfVals=prices.map(p=>calcAtWTI(m,p,aeco).dacf),fcfVals=prices.map(p=>calcAtWTI(m,p,aeco).fcf),barColors=fcfVals.map(v=>(v??0)>=0?'rgba(16,185,129,.75)':'rgba(239,68,68,.75)');
   const ctx=document.getElementById('chart-sens');
   if(ctx){if(sensitivityChart){sensitivityChart.destroy();sensitivityChart=null;}sensitivityChart=new Chart(ctx,{type:'bar',data:{labels:prices.map(p=>`$${p}`),datasets:[{label:'FCF',data:fcfVals,backgroundColor:barColors,yAxisID:'y',borderRadius:3},{label:'DACF',data:dacfVals,type:'line',borderColor:'rgba(245,158,11,.8)',backgroundColor:'transparent',pointRadius:2,tension:.4,yAxisID:'y'}]},options:{responsive:true,maintainAspectRatio:true,interaction:{mode:'index',intersect:false},plugins:{legend:{labels:{color:'#9aaac4',font:{family:'JetBrains Mono',size:11}}},tooltip:{backgroundColor:'#131820',borderColor:'#28344a',borderWidth:1,callbacks:{label:ctx=>{const v=ctx.raw;if(!v)return'';const a=Math.abs(v),s=v<0?'-':'';return` ${ctx.dataset.label}: ${a>=1e9?s+'$'+(a/1e9).toFixed(1)+'B':s+'$'+(a/1e6).toFixed(0)+'M'}`;},},}},scales:{x:{grid:{color:'rgba(30,39,56,.8)'},ticks:{color:'#6a7a9a',font:{family:'JetBrains Mono',size:10}}},y:{grid:{color:'rgba(30,39,56,.8)'},ticks:{color:'#6a7a9a',font:{family:'JetBrains Mono',size:10},callback:v=>{const a=Math.abs(v),s=v<0?'-':'';return a>=1e9?s+'$'+(a/1e9).toFixed(1)+'B':s+'$'+(a/1e6).toFixed(0)+'M';}}}}}})}
-  const tbody=document.getElementById('sens-matrix-body');
-  if(tbody){const matPrices=[40,50,55,60,65,70,75,80,85,90,100,110,120];tbody.innerHTML=matPrices.map(p=>{const r=calcAtWTI(m,p,aeco),isBase=Math.abs(p-wti)<3,ndCol=(r.ndCf??99)<=1.5?'pos':(r.ndCf??99)<=2.5?'':'neg',fcfCol=(r.fcfY??0)>=.10?'pos':(r.fcfY??0)<0?'neg':'',evD=m.ev&&r.dacf&&r.dacf>0?m.ev/r.dacf:null;return`<tr${isBase?' style="background:rgba(245,158,11,.06);font-weight:600"':''}><td style="${isBase?'color:var(--accent)':''}">$${p}/bbl${isBase?' ★':''}</td><td>${cV(m,r.dacf)}</td><td class="${fcfCol}">${cV(m,r.fcf)}</td><td class="${fcfCol}">${r.fcfY!=null?pct(r.fcfY):'—'}</td><td class="${ndCol}">${r.ndCf!=null?f1(r.ndCf)+'x':m.netDebt!=null&&m.netDebt<0?'Net Cash':'—'}</td><td>${evD?f1(evD)+'x':'—'}</td></tr>`;}).join('');}
 }
 
-function renderGrade(m,ss,profile){
-  const score=STATE.score;if(!score)return;
-  const gradeCard=`<div class="grade-card"><div class="grade-circle" style="color:${score.color};border-color:${score.color};background:${score.bg}">${score.grade}</div><div class="grade-score-num">${score.overall} / 100</div><div class="grade-label-txt" style="color:${score.color}">${score.label}</div><div class="grade-sub-txt" style="margin-top:.25rem">${score.grade.startsWith('A')?'Top-tier O&G operator.':score.grade.startsWith('B')?'Good operator. Above-average fundamentals.':score.grade.startsWith('C')?'Adequate. Some weaknesses to monitor.':'Significant challenges.'}</div><div style="font-family:var(--ff-m);font-size:.62rem;color:var(--muted);text-align:center;margin-top:.5rem">Sub-sector adjusted · Upload AIF+Annual Report for full accuracy</div></div>`;
-  const breakdownRows=Object.entries(SCORE_DIMS).map(([k,dim])=>{const v=score.cats[k]??0,col=v>=75?'var(--pos)':v>=50?'var(--warn)':'var(--neg)';return`<div class="grade-dim"><div class="grade-dim-name"><div class="grade-dim-dot" style="background:${dim.dot}"></div>${dim.label}<span style="font-family:var(--ff-m);font-size:.58rem;color:var(--muted)">${Math.round(dim.w*100)}%</span></div><div class="grade-dim-track"><div class="grade-dim-fill" style="width:${v}%;background:${col}"></div></div><div class="grade-dim-val" style="color:${col}">${v}</div></div>`;}).join('');
-  const narr=generateNarrative(m,score,ss,profile);
-  const wH=(icon,cls,items)=>items.map(i=>`<div class="watch-item"><span class="${cls}">${icon}</span>${i}</div>`).join('');
-  const narrativeBlock=`<div class="narrative"><div class="narrative-title">Analyst Commentary — ${(profile?.name??profile?.longName??STATE.ticker??'—').slice(0,35)}</div><div class="narrative-text">${narr.text}</div>${narr.positives.length||narr.concerns.length||narr.neutral.length?`<div class="watch-items">${wH('✅','watch-green',narr.positives)}${wH('⚠','watch-amber',narr.neutral)}${wH('🔴','watch-red',narr.concerns)}</div>`:''}</div>`;
-  const ratioCards=[{label:'Net Debt/CF',val:m.ndCf!=null?f2(m.ndCf)+'x':m.netDebt!=null&&m.netDebt<0?'Net Cash':'—',bar:m.ndCf!=null?Math.max(0,100-m.ndCf*25):80,col:'var(--blue)',good:m.ndCf==null||m.ndCf<1.5,txt:m.ndCf==null?'N/A':m.ndCf<.5?'Essentially debt-free':m.ndCf<1.5?`Conservative ${f1(m.ndCf)}x leverage`:m.ndCf<2.5?`Moderate ${f1(m.ndCf)}x`:`High ${f1(m.ndCf)}x — vulnerable`},{label:'FCF Yield',val:m.fcfYield!=null?pct(m.fcfYield):'—',bar:m.fcfYield!=null?Math.min(100,m.fcfYield*500):0,col:'var(--pos)',good:(m.fcfYield??0)>=.08,txt:m.fcfYield==null?'N/A':m.fcfYield>=.15?'Exceptional yield':m.fcfYield>=.08?'Strong FCF generation':m.fcfYield>=.02?'Modest FCF':'Negative FCF'},{label:'Netback/BOE',val:m.netbackBoe!=null?'$'+f2(m.netbackBoe)+'/boe':naAif(),bar:m.netbackBoe!=null?Math.min(100,m.netbackBoe*2):0,col:'var(--accent)',good:(m.netbackBoe??0)>=25,txt:m.netbackBoe==null?'Upload AIF/Annual Report':m.netbackBoe>=40?'World-class netback':m.netbackBoe>=28?'Solid unit economics':m.netbackBoe>=16?'Adequate':'Thin netback'},{label:'Reserve Life',val:m.rli!=null?f1(m.rli)+' yrs':naAif(),bar:m.rli!=null?Math.min(100,m.rli*5.5):0,col:'var(--purple)',good:(m.rli??0)>=10,txt:m.rli==null?'Upload AIF':m.rli>=15?'Excellent runway':m.rli>=10?'Adequate reserve life':m.rli>=7?'Short — needs drilling':'Very short RLI'},{label:'EV/DACF',val:m.evDacf!=null?f1(m.evDacf)+'x':'—',bar:m.evDacf!=null?Math.max(0,100-m.evDacf*10):0,col:'var(--teal)',good:(m.evDacf??99)<4,txt:m.evDacf==null?'N/A':m.evDacf<3.5?'Deep value':m.evDacf<5.5?'Fair value':m.evDacf<7?'Premium multiple':'Rich — premium vs peers'},{label:'Recycle Ratio',val:m.recycleR!=null?f1(m.recycleR)+'x':naAif(),bar:m.recycleR!=null?Math.min(100,m.recycleR*28):0,col:'var(--pos)',good:(m.recycleR??0)>=2,txt:m.recycleR==null?'Upload AIF':m.recycleR>=3?'Excellent capital efficiency':m.recycleR>=2?'Strong recycle ratio':m.recycleR>=1?'Adequate':'Sub-1x recycle ratio'}];
-  const ratioGrid=`<div class="section-label" style="margin-top:1.25rem">Key O&G Ratios</div><div class="metric-cards" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr))">${ratioCards.map(r=>`<div class="mc"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem"><div class="mc-label">${r.label}</div><span style="font-family:var(--ff-m);font-size:.6rem;padding:.1rem .35rem;border-radius:3px;background:${r.good?'rgba(16,185,129,.1)':'rgba(239,68,68,.1)'};color:${r.good?'var(--pos)':'var(--neg)'};">${r.good?'✓ OK':'⚠ Watch'}</span></div><div class="mc-value">${r.val}</div><div class="mc-sub" style="font-size:.68rem;line-height:1.4;margin-top:.35rem">${r.txt}</div><div class="mc-bar" style="margin-top:.5rem"><div class="mc-bar-fill" style="width:${r.bar}%;background:${r.col}"></div></div></div>`).join('')}</div>`;
-  document.getElementById('grade-content').innerHTML=`<div class="grade-layout">${gradeCard}<div><div class="grade-breakdown"><div class="section-label" style="margin-bottom:.875rem">Score Breakdown</div>${breakdownRows}</div></div></div>${narrativeBlock}${ratioGrid}`;
+function _renderSensMatrix(m,wti,aeco){
+  const tbody=document.getElementById('sens-matrix-body');
+  if(tbody){const matPrices=[40,50,55,60,65,70,75,80,85,90,100,110,120];tbody.innerHTML=matPrices.map(p=>{const r=calcAtWTI(m,p,aeco),isBase=Math.abs(p-wti)<3,ndCol=(r.ndCf??99)<=1.5?'pos':(r.ndCf??99)<=2.5?'':'neg',fcfCol=(r.fcfY??0)>=.10?'pos':(r.fcfY??0)<0?'neg':'',evD=m.ev&&r.dacf&&r.dacf>0?m.ev/r.dacf:null;return`<tr${isBase?' style="background:rgba(245,158,11,.06);font-weight:600"':''}><td style="${isBase?'color:var(--accent)':''}">$${p}/bbl${isBase?' ★':''}</td><td>${cV(m,r.dacf)}</td><td class="${fcfCol}">${cV(m,r.fcf)}</td><td class="${fcfCol}">${r.fcfY!=null?pct(r.fcfY):'—'}</td><td class="${ndCol}">${r.ndCf!=null?f1(r.ndCf)+'x':m.netDebt!=null&&m.netDebt<0?'Net Cash':'—'}</td><td>${evD?f1(evD)+'x':'—'}</td></tr>`;}).join('');}
 }
 
 // ── INIT ──────────────────────────────────────────────────
@@ -1066,7 +1130,13 @@ document.addEventListener('DOMContentLoaded',()=>{
   fetchCommodities();updateClock();setInterval(updateClock,60000);
   document.getElementById('ticker-input').addEventListener('keydown',e=>{if(e.key==='Enter')runAnalysis();});
   document.getElementById('fh-key').addEventListener('keydown',e=>{if(e.key==='Enter')runAnalysis();});
+  document.getElementById('fh-key').addEventListener('input',e=>{if(e.target.value.trim())document.getElementById('fh-saved').classList.add('vis');});
   document.getElementById('gem-key').addEventListener('keydown',e=>{if(e.key==='Enter')runAnalysis();});
+  document.getElementById('gem-key').addEventListener('input',e=>{
+    STATE.gemKey=e.target.value.trim();
+    if(STATE.gemKey){document.getElementById('gem-saved').classList.add('vis');}
+    else{document.getElementById('gem-saved').classList.remove('vis');}
+  });
 });
 </script>
 </body>
