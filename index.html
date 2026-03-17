@@ -343,6 +343,7 @@ footer{text-align:center;padding:1.5rem;color:var(--muted);font-family:var(--ff-
 <!-- MANUAL ENTRY MODAL -->
 <div id="manual-modal">
   <div class="modal-box">
+    <div id="missing-banner" style="display:none"></div>
     <div class="modal-title">
       <span>✏️ Manual O&amp;G Data Entry</span>
       <button class="modal-close" onclick="closeModal()">✕</button>
@@ -509,7 +510,7 @@ async function callGemini(text,prompt){
   const wait=4000-(Date.now()-STATE.lastGemCall);
   if(wait>0){setDocStatus('ar-status',`⏳ Rate limit pause (${Math.ceil(wait/1000)}s)…`,'parsing');await new Promise(r=>setTimeout(r,wait));}
   STATE.lastGemCall=Date.now();
-  const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${STATE.gemKey}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:prompt+'\n\n---\n\n'+text.slice(0,32000)}]}],generationConfig:{temperature:0,responseMimeType:'application/json'}})});
+  const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${STATE.gemKey}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:prompt+'\n\n---\n\n'+text.slice(0,32000)}]}],generationConfig:{temperature:0,responseMimeType:'application/json'}})});
   if(!r.ok)throw new Error(`Gemini ${r.status}`);
   const d=await r.json();
   const raw=d.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -878,7 +879,11 @@ function openModal(){
   document.getElementById('manual-modal').style.display='block';
   document.body.style.overflow='hidden';
 }
-function closeModal(){document.getElementById('manual-modal').style.display='none';document.body.style.overflow='';}
+function closeModal(){
+  document.getElementById('manual-modal').style.display='none';
+  document.body.style.overflow='';
+  const b=document.getElementById('missing-banner');if(b)b.style.display='none';
+}
 function clearModal(){STATE.manualData={};['prodBoed','prodLiq','prodGas','liqPct','pdp','1p','2p','rli','rev','roy','opex','trans','gna','nb','fd','recycle','wti','aeco','nd','opcf','capex','fcf','rev2','ebitda'].forEach(k=>{const el=document.getElementById('m-'+k);if(el)el.value='';});}
 function saveModal(){
   const man={};
@@ -922,9 +927,47 @@ async function runAnalysis(){
     STATE.subSector=detectSubSector(STATE.profile,ticker);
     STATE.metrics=calcMetrics(rawFH,STATE.aif,STATE.commodities);
     STATE.score=scoreOG(STATE.metrics,STATE.subSector);
-    renderAll();setState('results');
-    const firstBtn=document.querySelector('.tab-btn');if(firstBtn)switchTab('tearsheet',firstBtn);
+
+    // Check for missing key O&G data — open manual entry if gaps exist
+    const hasMissingData = checkForMissingData(STATE.metrics);
+    if(hasMissingData){
+      renderAll();setState('results');
+      const firstBtn=document.querySelector('.tab-btn');if(firstBtn)switchTab('tearsheet',firstBtn);
+      // Small delay so results render first, then modal opens
+      setTimeout(()=>openModalWithPrompt(),400);
+    } else {
+      renderAll();setState('results');
+      const firstBtn=document.querySelector('.tab-btn');if(firstBtn)switchTab('tearsheet',firstBtn);
+    }
   }catch(e){setState('landing');showError(e.message||'An error occurred.');}
+}
+
+function checkForMissingData(m){
+  // Returns true if important fields are missing that a user could fill in
+  const missing=[];
+  if(!m.netDebt && m.netDebt!==0) missing.push('Net Debt');
+  if(!m.opCF)   missing.push('Operating Cash Flow');
+  if(!m.fcf)    missing.push('Free Cash Flow');
+  if(!m.prodBoed) missing.push('Production (BOE/d)');
+  if(!m.netbackBoe) missing.push('Netback $/BOE');
+  if(!m.res2P)  missing.push('2P Reserves');
+  STATE._missingFields = missing;
+  // Only prompt if 3+ important fields missing
+  return missing.length >= 3;
+}
+
+function openModalWithPrompt(){
+  const missing = STATE._missingFields ?? [];
+  // Add a banner inside the modal before opening
+  const banner = document.getElementById('missing-banner');
+  if(banner && missing.length > 0){
+    banner.innerHTML = `<div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);border-radius:6px;padding:.65rem .875rem;margin-bottom:1rem;font-family:var(--ff-m);font-size:.68rem;color:var(--accent)">
+      ⚠ Missing data detected — fill in what you can for a more accurate analysis:<br/>
+      <span style="color:var(--muted2)">${missing.join(' · ')}</span>
+    </div>`;
+    banner.style.display='block';
+  }
+  openModal();
 }
 function renderAll(){const m=STATE.metrics,ss=STATE.subSector,prf=STATE.profile,c=STATE.commodities;renderCompanyHeader(m,ss,prf);renderTearsheet(m,c);renderValuation(m,ss);renderPeers(m,ss);renderSensitivity(m);renderGrade(m,ss,prf);}
 
@@ -1123,6 +1166,18 @@ function _renderSensChart(m,wti,aeco){
 function _renderSensMatrix(m,wti,aeco){
   const tbody=document.getElementById('sens-matrix-body');
   if(tbody){const matPrices=[40,50,55,60,65,70,75,80,85,90,100,110,120];tbody.innerHTML=matPrices.map(p=>{const r=calcAtWTI(m,p,aeco),isBase=Math.abs(p-wti)<3,ndCol=(r.ndCf??99)<=1.5?'pos':(r.ndCf??99)<=2.5?'':'neg',fcfCol=(r.fcfY??0)>=.10?'pos':(r.fcfY??0)<0?'neg':'',evD=m.ev&&r.dacf&&r.dacf>0?m.ev/r.dacf:null;return`<tr${isBase?' style="background:rgba(245,158,11,.06);font-weight:600"':''}><td style="${isBase?'color:var(--accent)':''}">$${p}/bbl${isBase?' ★':''}</td><td>${cV(m,r.dacf)}</td><td class="${fcfCol}">${cV(m,r.fcf)}</td><td class="${fcfCol}">${r.fcfY!=null?pct(r.fcfY):'—'}</td><td class="${ndCol}">${r.ndCf!=null?f1(r.ndCf)+'x':m.netDebt!=null&&m.netDebt<0?'Net Cash':'—'}</td><td>${evD?f1(evD)+'x':'—'}</td></tr>`;}).join('');}
+}
+
+function renderGrade(m,ss,profile){
+  const score=STATE.score;if(!score)return;
+  const gradeCard=`<div class="grade-card"><div class="grade-circle" style="color:${score.color};border-color:${score.color};background:${score.bg}">${score.grade}</div><div class="grade-score-num">${score.overall} / 100</div><div class="grade-label-txt" style="color:${score.color}">${score.label}</div><div class="grade-sub-txt" style="margin-top:.25rem">${score.grade.startsWith('A')?'Top-tier O&G operator.':score.grade.startsWith('B')?'Good operator. Above-average fundamentals.':score.grade.startsWith('C')?'Adequate. Some weaknesses to monitor.':'Significant challenges.'}</div><div style="font-family:var(--ff-m);font-size:.62rem;color:var(--muted);text-align:center;margin-top:.5rem">Sub-sector adjusted · Upload AIF+Annual Report for full accuracy</div></div>`;
+  const breakdownRows=Object.entries(SCORE_DIMS).map(([k,dim])=>{const v=score.cats[k]??0,col=v>=75?'var(--pos)':v>=50?'var(--warn)':'var(--neg)';return`<div class="grade-dim"><div class="grade-dim-name"><div class="grade-dim-dot" style="background:${dim.dot}"></div>${dim.label}<span style="font-family:var(--ff-m);font-size:.58rem;color:var(--muted)">${Math.round(dim.w*100)}%</span></div><div class="grade-dim-track"><div class="grade-dim-fill" style="width:${v}%;background:${col}"></div></div><div class="grade-dim-val" style="color:${col}">${v}</div></div>`;}).join('');
+  const narr=generateNarrative(m,score,ss,profile);
+  const wH=(icon,cls,items)=>items.map(i=>`<div class="watch-item"><span class="${cls}">${icon}</span>${i}</div>`).join('');
+  const narrativeBlock=`<div class="narrative"><div class="narrative-title">Analyst Commentary — ${(profile?.name??profile?.longName??STATE.ticker??'—').slice(0,35)}</div><div class="narrative-text">${narr.text}</div>${narr.positives.length||narr.concerns.length||narr.neutral.length?`<div class="watch-items">${wH('✅','watch-green',narr.positives)}${wH('⚠','watch-amber',narr.neutral)}${wH('🔴','watch-red',narr.concerns)}</div>`:''}</div>`;
+  const ratioCards=[{label:'Net Debt/CF',val:m.ndCf!=null?f2(m.ndCf)+'x':m.netDebt!=null&&m.netDebt<0?'Net Cash':'—',bar:m.ndCf!=null?Math.max(0,100-m.ndCf*25):80,col:'var(--blue)',good:m.ndCf==null||m.ndCf<1.5,txt:m.ndCf==null?'N/A':m.ndCf<.5?'Essentially debt-free':m.ndCf<1.5?`Conservative ${f1(m.ndCf)}x leverage`:m.ndCf<2.5?`Moderate ${f1(m.ndCf)}x`:`High ${f1(m.ndCf)}x — vulnerable`},{label:'FCF Yield',val:m.fcfYield!=null?pct(m.fcfYield):'—',bar:m.fcfYield!=null?Math.min(100,m.fcfYield*500):0,col:'var(--pos)',good:(m.fcfYield??0)>=.08,txt:m.fcfYield==null?'N/A':m.fcfYield>=.15?'Exceptional yield':m.fcfYield>=.08?'Strong FCF generation':m.fcfYield>=.02?'Modest FCF':'Negative FCF'},{label:'Netback/BOE',val:m.netbackBoe!=null?'$'+f2(m.netbackBoe)+'/boe':naAif(),bar:m.netbackBoe!=null?Math.min(100,m.netbackBoe*2):0,col:'var(--accent)',good:(m.netbackBoe??0)>=25,txt:m.netbackBoe==null?'Upload AIF/Annual Report':m.netbackBoe>=40?'World-class netback':m.netbackBoe>=28?'Solid unit economics':m.netbackBoe>=16?'Adequate':'Thin netback'},{label:'Reserve Life',val:m.rli!=null?f1(m.rli)+' yrs':naAif(),bar:m.rli!=null?Math.min(100,m.rli*5.5):0,col:'var(--purple)',good:(m.rli??0)>=10,txt:m.rli==null?'Upload AIF':m.rli>=15?'Excellent runway':m.rli>=10?'Adequate reserve life':m.rli>=7?'Short — needs drilling':'Very short RLI'},{label:'EV/DACF',val:m.evDacf!=null?f1(m.evDacf)+'x':'—',bar:m.evDacf!=null?Math.max(0,100-m.evDacf*10):0,col:'var(--teal)',good:(m.evDacf??99)<4,txt:m.evDacf==null?'N/A':m.evDacf<3.5?'Deep value':m.evDacf<5.5?'Fair value':m.evDacf<7?'Premium multiple':'Rich — premium vs peers'},{label:'Recycle Ratio',val:m.recycleR!=null?f1(m.recycleR)+'x':naAif(),bar:m.recycleR!=null?Math.min(100,m.recycleR*28):0,col:'var(--pos)',good:(m.recycleR??0)>=2,txt:m.recycleR==null?'Upload AIF':m.recycleR>=3?'Excellent capital efficiency':m.recycleR>=2?'Strong recycle ratio':m.recycleR>=1?'Adequate':'Sub-1x recycle ratio'}];
+  const ratioGrid=`<div class="section-label" style="margin-top:1.25rem">Key O&G Ratios</div><div class="metric-cards" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr))">${ratioCards.map(r=>`<div class="mc"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.3rem"><div class="mc-label">${r.label}</div><span style="font-family:var(--ff-m);font-size:.6rem;padding:.1rem .35rem;border-radius:3px;background:${r.good?'rgba(16,185,129,.1)':'rgba(239,68,68,.1)'};color:${r.good?'var(--pos)':'var(--neg)'};">${r.good?'✓ OK':'⚠ Watch'}</span></div><div class="mc-value">${r.val}</div><div class="mc-sub" style="font-size:.68rem;line-height:1.4;margin-top:.35rem">${r.txt}</div><div class="mc-bar" style="margin-top:.5rem"><div class="mc-bar-fill" style="width:${r.bar}%;background:${r.col}"></div></div></div>`).join('')}</div>`;
+  document.getElementById('grade-content').innerHTML=`<div class="grade-layout">${gradeCard}<div><div class="grade-breakdown"><div class="section-label" style="margin-bottom:.875rem">Score Breakdown</div>${breakdownRows}</div></div></div>${narrativeBlock}${ratioGrid}`;
 }
 
 // ── INIT ──────────────────────────────────────────────────
